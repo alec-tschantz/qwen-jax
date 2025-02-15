@@ -3,96 +3,110 @@ import torch
 import equinox as eqx
 from jax import Array, numpy as jnp
 
-from .model import QwenForCausalLM
+from .model import (
+    Embedding,
+    Linear,
+    RotaryEmbedding,
+    RMSNorm,
+    Attention,
+    Dense,
+    DecoderLayer,
+    Model,
+    QwenModel,
+)
 
 
 def torch_to_jax(tensor: torch.Tensor) -> Array:
     return jnp.array(tensor.detach().numpy())
 
 
-def convert_hf(hf_model: torch.nn.Module, model: QwenForCausalLM) -> QwenForCausalLM:
-    model = eqx.tree_at(
-        lambda t: t.model.embed_tokens.weight,
-        model,
-        torch_to_jax(hf_model.model.embed_tokens.weight),
+def from_hf(hf_model: torch.nn.Module) -> QwenModel:
+    cfg = hf_model.config
+
+    embed = Embedding(weight=torch_to_jax(hf_model.model.embed_tokens.weight))
+
+    final_norm = RMSNorm(
+        weight=torch_to_jax(hf_model.model.norm.weight),
+        eps=hf_model.config.rms_norm_eps,
     )
 
-    model = eqx.tree_at(
-        lambda t: t.model.norm.weight,
-        model,
-        torch_to_jax(hf_model.model.norm.weight),
+    hidden_size = hf_model.config.hidden_size
+    num_heads = hf_model.config.num_attention_heads
+    dim = hidden_size // num_heads
+    inv_freq = 1.0 / (
+        hf_model.config.rope_theta ** (jnp.arange(0, dim, 2).astype(jnp.float32) / dim)
+    )
+    rot_emb = RotaryEmbedding(
+        inv_freq=inv_freq,
+        max_seq_len_cached=hf_model.config.max_position_embeddings,
+        rope_theta=hf_model.config.rope_theta,
     )
 
-    model = eqx.tree_at(
-        lambda t: t.lm_head.weight,
-        model,
-        torch_to_jax(hf_model.lm_head.weight),
-    )
-
-    for i, layer in enumerate(model.model.layers):
+    layers_out = []
+    for i in range(hf_model.config.num_hidden_layers):
         hf_layer = hf_model.model.layers[i]
 
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].self_attn.q_proj.weight,
-            model,
-            torch_to_jax(hf_layer.self_attn.q_proj.weight),
+        q_proj = Linear(
+            weight=torch_to_jax(hf_layer.self_attn.q_proj.weight),
+            bias=torch_to_jax(hf_layer.self_attn.q_proj.bias),
         )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].self_attn.q_proj.bias,
-            model,
-            torch_to_jax(hf_layer.self_attn.q_proj.bias),
+        k_proj = Linear(
+            weight=torch_to_jax(hf_layer.self_attn.k_proj.weight),
+            bias=torch_to_jax(hf_layer.self_attn.k_proj.bias),
         )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].self_attn.k_proj.weight,
-            model,
-            torch_to_jax(hf_layer.self_attn.k_proj.weight),
+        v_proj = Linear(
+            weight=torch_to_jax(hf_layer.self_attn.v_proj.weight),
+            bias=torch_to_jax(hf_layer.self_attn.v_proj.bias),
         )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].self_attn.k_proj.bias,
-            model,
-            torch_to_jax(hf_layer.self_attn.k_proj.bias),
+        o_proj = Linear(
+            weight=torch_to_jax(hf_layer.self_attn.o_proj.weight),
+            bias=None,
         )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].self_attn.v_proj.weight,
-            model,
-            torch_to_jax(hf_layer.self_attn.v_proj.weight),
-        )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].self_attn.v_proj.bias,
-            model,
-            torch_to_jax(hf_layer.self_attn.v_proj.bias),
-        )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].self_attn.o_proj.weight,
-            model,
-            torch_to_jax(hf_layer.self_attn.o_proj.weight),
+        attn_struct = Attention(
+            q_proj=q_proj,
+            k_proj=k_proj,
+            v_proj=v_proj,
+            o_proj=o_proj,
+            num_heads=hf_model.config.num_attention_heads,
+            num_key_value_heads=hf_model.config.num_key_value_heads,
+            num_key_value_groups=(
+                hf_model.config.num_attention_heads
+                // hf_model.config.num_key_value_heads
+            ),
+            head_dim=(
+                hf_model.config.hidden_size // hf_model.config.num_attention_heads
+            ),
         )
 
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].mlp.gate_proj.weight,
-            model,
-            torch_to_jax(hf_layer.mlp.gate_proj.weight),
-        )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].mlp.up_proj.weight,
-            model,
-            torch_to_jax(hf_layer.mlp.up_proj.weight),
-        )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].mlp.down_proj.weight,
-            model,
-            torch_to_jax(hf_layer.mlp.down_proj.weight),
+        mlp_struct = Dense(
+            gate_proj=Linear(
+                weight=torch_to_jax(hf_layer.mlp.gate_proj.weight), bias=None
+            ),
+            up_proj=Linear(weight=torch_to_jax(hf_layer.mlp.up_proj.weight), bias=None),
+            down_proj=Linear(
+                weight=torch_to_jax(hf_layer.mlp.down_proj.weight), bias=None
+            ),
         )
 
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].input_layernorm.weight,
-            model,
-            torch_to_jax(hf_layer.input_layernorm.weight),
+        in_ln = RMSNorm(
+            weight=torch_to_jax(hf_layer.input_layernorm.weight),
+            eps=hf_model.config.rms_norm_eps,
         )
-        model = eqx.tree_at(
-            lambda t: t.model.layers[i].post_attention_layernorm.weight,
-            model,
-            torch_to_jax(hf_layer.post_attention_layernorm.weight),
+        post_ln = RMSNorm(
+            weight=torch_to_jax(hf_layer.post_attention_layernorm.weight),
+            eps=hf_model.config.rms_norm_eps,
+        )
+        layers_out.append(
+            DecoderLayer(
+                self_attn=attn_struct,
+                mlp=mlp_struct,
+                input_layernorm=in_ln,
+                post_attention_layernorm=post_ln,
+            )
         )
 
-    return model
+    model_struct = Model(
+        embed_tokens=embed, layers=layers_out, norm=final_norm, rotary_emb=rot_emb
+    )
+    lm_head = Linear(weight=torch_to_jax(hf_model.lm_head.weight), bias=None)
+    return QwenModel(model=model_struct, lm_head=lm_head)
