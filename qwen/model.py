@@ -150,7 +150,7 @@ def forward_mlp(m: Dense, x: Array) -> Array:
     return forward_linear(m.down_proj, nn.silu(gx) * ux)
 
 
-def decoder_forward(
+def forward_decoder(
     d: DecoderLayer,
     hidden: Array,
     cos: Array,
@@ -182,7 +182,7 @@ def forward_model(
     hidden = forward_embedding(model.embed_tokens, input_ids)
     cos, sin = forward_rotary_embedding(model.rotary_emb, hidden, position_ids)
     for layer in model.layers:
-        hidden = decoder_forward(layer, hidden, cos, sin, attention_mask)
+        hidden = forward_decoder(layer, hidden, cos, sin, attention_mask)
     hidden = forward_rms_norm(model.norm, hidden)
     return hidden
 
