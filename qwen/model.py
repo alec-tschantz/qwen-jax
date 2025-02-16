@@ -68,9 +68,8 @@ def forward_rotary_embedding(
     r: RotaryEmbedding, hidden: Array, position_ids: Array
 ) -> tuple[Array, Array]:
     b, s, _ = hidden.shape
-    t = position_ids.reshape(b, s, 1)
-    inv_freq = 1.0 / (r.theta ** (jnp.arange(0, r.dim, 2, dtype=jnp.float32) / r.dim))
-    freqs = t * inv_freq[None, None, :]
+    inv_freq = 1.0 / (r.theta ** (jnp.arange(0, r.dim, 2) / r.dim))
+    freqs = position_ids.reshape(b, s, 1) * inv_freq[None, None, :]
     emb = jnp.concatenate((freqs, freqs), axis=-1)
     return jnp.cos(emb), jnp.sin(emb)
 
