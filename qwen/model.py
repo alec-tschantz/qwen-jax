@@ -1,33 +1,30 @@
 from typing import Optional, List
 from dataclasses import dataclass
 
+import equinox as eqx
 from jax import Array, numpy as jnp, lax, nn
 
 
-@dataclass
-class Embedding:
+class Embedding(eqx.Module):
     weight: Array
 
 
-@dataclass
-class Linear:
+class Linear(eqx.Module):
     weight: Array
     bias: Optional[Array]
 
 
-@dataclass
-class RotaryEmbedding:
-    inv_freq: Array
+class RotaryEmbedding(eqx.Module):
+    dim: int
+    theta: float
 
 
-@dataclass
-class RMSNorm:
+class RMSNorm(eqx.Module):
     weight: Array
     eps: float
 
 
-@dataclass
-class Attention:
+class Attention(eqx.Module):
     q_proj: Linear
     k_proj: Linear
     v_proj: Linear
@@ -37,23 +34,20 @@ class Attention:
     num_key_value_heads: int
 
 
-@dataclass
-class Dense:
+class Dense(eqx.Module):
     gate_proj: Linear
     up_proj: Linear
     down_proj: Linear
 
 
-@dataclass
-class DecoderLayer:
+class DecoderLayer(eqx.Module):
     self_attn: Attention
     mlp: Dense
     input_layernorm: RMSNorm
     post_attention_layernorm: RMSNorm
 
 
-@dataclass
-class QwenModel:
+class QwenModel(eqx.Module):
     embed_tokens: Embedding
     layers: List[DecoderLayer]
     norm: RMSNorm
@@ -75,7 +69,8 @@ def forward_rotary_embedding(
 ) -> tuple[Array, Array]:
     b, s, _ = hidden.shape
     t = position_ids.reshape(b, s, 1)
-    freqs = t * r.inv_freq[None, None, :]
+    inv_freq = 1.0 / (r.theta ** (jnp.arange(0, r.dim, 2, dtype=jnp.float32) / r.dim))
+    freqs = t * inv_freq[None, None, :]
     emb = jnp.concatenate((freqs, freqs), axis=-1)
     return jnp.cos(emb), jnp.sin(emb)
 
@@ -174,7 +169,7 @@ def forward(
 ) -> Array:
     if position_ids is None:
         b, s = input_ids.shape
-        position_ids = jnp.arange(s)[None, :]
+        position_ids = jnp.tile(jnp.arange(s)[None, :], (b, 1))
 
     hidden = forward_embedding(model.embed_tokens, input_ids)
     cos, sin = forward_rotary_embedding(model.rotary_emb, hidden, position_ids)

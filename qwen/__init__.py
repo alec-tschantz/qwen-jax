@@ -7,6 +7,7 @@ from .model import (
     Dense,
     DecoderLayer,
     QwenModel,
-    generate
+    generate,
+    forward
 )
 from . import utils

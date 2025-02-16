@@ -29,13 +29,8 @@ def from_hf(hf_model: torch.nn.Module) -> QwenModel:
         eps=hf_model.config.rms_norm_eps,
     )
 
-    hidden_size = hf_model.config.hidden_size
-    num_heads = hf_model.config.num_attention_heads
-    dim = hidden_size // num_heads
-    inv_freq = 1.0 / (
-        hf_model.config.rope_theta ** (jnp.arange(0, dim, 2).astype(jnp.float32) / dim)
-    )
-    rot_emb = RotaryEmbedding(inv_freq=inv_freq)
+    emb_dim = hf_model.config.hidden_size // hf_model.config.num_attention_heads
+    rot_emb = RotaryEmbedding(theta=hf_model.config.rope_theta, dim=emb_dim)
 
     layers_out = []
     for i, hf_layer in enumerate(hf_model.model.layers):
