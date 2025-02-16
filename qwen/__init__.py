@@ -6,7 +6,6 @@ from .model import (
     Attention,
     Dense,
     DecoderLayer,
-    Model,
     QwenModel,
     generate
 )

@@ -11,7 +11,6 @@ from .model import (
     Attention,
     Dense,
     DecoderLayer,
-    Model,
     QwenModel,
 )
 
@@ -36,15 +35,10 @@ def from_hf(hf_model: torch.nn.Module) -> QwenModel:
     inv_freq = 1.0 / (
         hf_model.config.rope_theta ** (jnp.arange(0, dim, 2).astype(jnp.float32) / dim)
     )
-    rot_emb = RotaryEmbedding(
-        inv_freq=inv_freq,
-        max_seq_len_cached=hf_model.config.max_position_embeddings,
-        rope_theta=hf_model.config.rope_theta,
-    )
+    rot_emb = RotaryEmbedding(inv_freq=inv_freq)
 
     layers_out = []
-    for i in range(hf_model.config.num_hidden_layers):
-        hf_layer = hf_model.model.layers[i]
+    for i, hf_layer in enumerate(hf_model.model.layers):
 
         q_proj = Linear(
             weight=torch_to_jax(hf_layer.self_attn.q_proj.weight),
@@ -69,10 +63,6 @@ def from_hf(hf_model: torch.nn.Module) -> QwenModel:
             o_proj=o_proj,
             num_heads=hf_model.config.num_attention_heads,
             num_key_value_heads=hf_model.config.num_key_value_heads,
-            num_key_value_groups=(
-                hf_model.config.num_attention_heads
-                // hf_model.config.num_key_value_heads
-            ),
             head_dim=(
                 hf_model.config.hidden_size // hf_model.config.num_attention_heads
             ),
@@ -105,8 +95,11 @@ def from_hf(hf_model: torch.nn.Module) -> QwenModel:
             )
         )
 
-    model_struct = Model(
-        embed_tokens=embed, layers=layers_out, norm=final_norm, rotary_emb=rot_emb
-    )
     lm_head = Linear(weight=torch_to_jax(hf_model.lm_head.weight), bias=None)
-    return QwenModel(model=model_struct, lm_head=lm_head)
+    return QwenModel(
+        embed_tokens=embed,
+        layers=layers_out,
+        norm=final_norm,
+        rotary_emb=rot_emb,
+        lm_head=lm_head,
+    )

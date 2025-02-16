@@ -1,7 +1,7 @@
 from typing import Optional, List
 from dataclasses import dataclass
 
-from jax import Array, random as jr, numpy as jnp, lax, nn
+from jax import Array, numpy as jnp, lax, nn
 
 
 @dataclass
@@ -18,8 +18,6 @@ class Linear:
 @dataclass
 class RotaryEmbedding:
     inv_freq: Array
-    max_seq_len_cached: int
-    rope_theta: float
 
 
 @dataclass
@@ -35,9 +33,8 @@ class Attention:
     v_proj: Linear
     o_proj: Linear
     num_heads: int
-    num_key_value_heads: int
-    num_key_value_groups: int
     head_dim: int
+    num_key_value_heads: int
 
 
 @dataclass
@@ -56,16 +53,11 @@ class DecoderLayer:
 
 
 @dataclass
-class Model:
+class QwenModel:
     embed_tokens: Embedding
     layers: List[DecoderLayer]
     norm: RMSNorm
     rotary_emb: RotaryEmbedding
-
-
-@dataclass
-class QwenModel:
-    model: Model
     lm_head: Linear
 
 
@@ -79,31 +71,30 @@ def forward_linear(l: Linear, x: Array) -> Array:
 
 
 def forward_rotary_embedding(
-    r: RotaryEmbedding, hidden_states: Array, position_ids: Array
+    r: RotaryEmbedding, hidden: Array, position_ids: Array
 ) -> tuple[Array, Array]:
-    b, s, _ = hidden_states.shape
-    t = position_ids.astype(jnp.float32).reshape(b, s, 1)
-    inv_freq_ = r.inv_freq[None, None, :]
-    freqs = t * inv_freq_
+    b, s, _ = hidden.shape
+    t = position_ids.reshape(b, s, 1)
+    freqs = t * r.inv_freq[None, None, :]
     emb = jnp.concatenate((freqs, freqs), axis=-1)
-    cos = jnp.cos(emb)
-    sin = jnp.sin(emb)
-    return cos.astype(hidden_states.dtype), sin.astype(hidden_states.dtype)
+    return jnp.cos(emb), jnp.sin(emb)
 
 
-def forward_rms_norm(r: RMSNorm, hidden_states: Array) -> Array:
-    variance = jnp.mean(hidden_states**2, axis=-1, keepdims=True)
-    x = hidden_states * lax.rsqrt(variance + r.eps)
+def forward_rms_norm(r: RMSNorm, hidden: Array) -> Array:
+    variance = jnp.mean(hidden**2, axis=-1, keepdims=True)
+    x = hidden * lax.rsqrt(variance + r.eps)
     return r.weight * x
 
 
 def forward_attention(
     a: Attention,
-    hidden_states: Array,
+    hidden: Array,
     cos: Array,
     sin: Array,
     attention_mask: Optional[Array],
 ) -> Array:
+    b, seqlen, _ = hidden.shape
+
     def rotate_half(u: Array) -> Array:
         u1, u2 = jnp.split(u, 2, axis=-1)
         return jnp.concatenate((-u2, u1), axis=-1)
@@ -117,19 +108,23 @@ def forward_attention(
         k_ = (k * c) + (rotate_half(k) * s)
         return q_, k_
 
-    b, seqlen, _ = hidden_states.shape
-    q = forward_linear(a.q_proj, hidden_states)
-    k = forward_linear(a.k_proj, hidden_states)
-    v = forward_linear(a.v_proj, hidden_states)
+    q = forward_linear(a.q_proj, hidden)
+    k = forward_linear(a.k_proj, hidden)
+    v = forward_linear(a.v_proj, hidden)
+
     q = q.reshape(b, seqlen, a.num_heads, a.head_dim).transpose(0, 2, 1, 3)
     k = k.reshape(b, seqlen, a.num_key_value_heads, a.head_dim).transpose(0, 2, 1, 3)
     v = v.reshape(b, seqlen, a.num_key_value_heads, a.head_dim).transpose(0, 2, 1, 3)
+
     q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
     if a.num_key_value_heads != a.num_heads:
         factor = a.num_heads // a.num_key_value_heads
         k = jnp.repeat(k, repeats=factor, axis=1)
         v = jnp.repeat(v, repeats=factor, axis=1)
+
     scores = jnp.einsum("bhqd,bhkd->bhqk", q, k) / jnp.sqrt(a.head_dim)
+
     cmask = jnp.tril(jnp.ones((seqlen, seqlen)))
     cmask = cmask[None, None, :, :]
     if attention_mask is not None:
@@ -137,10 +132,12 @@ def forward_attention(
         mask = jnp.minimum(cmask, attention_mask)
     else:
         mask = cmask
+
     scores = jnp.where(mask == 0, float("-inf"), scores)
     probs = nn.softmax(scores, axis=-1)
     out = jnp.einsum("bhqk,bhkd->bhqd", probs, v)
     out = out.transpose(0, 2, 1, 3).reshape(b, seqlen, -1)
+
     return forward_linear(a.o_proj, out)
 
 
@@ -169,10 +166,10 @@ def forward_decoder(
     return hidden
 
 
-def forward_model(
-    model: Model,
+def forward(
+    model: QwenModel,
     input_ids: Array,
-    attention_mask: Optional[Array],
+    attention_mask: Optional[Array] = None,
     position_ids: Optional[Array] = None,
 ) -> Array:
     if position_ids is None:
@@ -184,16 +181,6 @@ def forward_model(
     for layer in model.layers:
         hidden = forward_decoder(layer, hidden, cos, sin, attention_mask)
     hidden = forward_rms_norm(model.norm, hidden)
-    return hidden
-
-
-def forward(
-    model: QwenModel,
-    input_ids: Array,
-    attention_mask: Optional[Array] = None,
-    position_ids: Optional[Array] = None,
-) -> Array:
-    hidden = forward_model(model.model, input_ids, attention_mask, position_ids)
     return forward_linear(model.lm_head, hidden)
 
 
