@@ -16,29 +16,49 @@ from .model import (
 
 
 def init(
-    key: jr.PRNGKey,
-    vocab_size: int = 10000,
-    hidden_size: int = 256,
-    num_layers: int = 2,
-    num_heads: int = 4,
-    num_key_value_heads: int = 4,
-    rope_theta: float = 10000.0,
-    rms_norm_eps: float = 1e-5,
+    key,
+    object1_size=16,
+    object2_size=16,
+    object3_size=16,
+    action_size=3,
+    embed_dim_per_field=32,
+    hidden_size=256,
+    num_layers=2,
+    num_heads=4,
+    num_key_value_heads=4,
+    rope_theta=10000.0,
+    rms_norm_eps=1e-5,
 ) -> QwenModel:
-    keys = jr.split(key, 4 + num_layers)
-    embed = init_embedding(keys[0], vocab_size, hidden_size)
+    keys = jr.split(key, 5 + num_layers)
+
+    embed_obj1 = init_embedding(keys[0], object1_size, embed_dim_per_field)
+    embed_obj2 = init_embedding(keys[1], object2_size, embed_dim_per_field)
+    embed_obj3 = init_embedding(keys[2], object3_size, embed_dim_per_field)
+    embed_action = init_embedding(keys[3], action_size, embed_dim_per_field)
+
+    embed_proj = init_linear(
+        keys[4], in_dim=embed_dim_per_field * 4, out_dim=hidden_size
+    )
+
     final_norm = init_rms_norm(hidden_size, rms_norm_eps)
     head_dim = hidden_size // num_heads
     rot_emb = init_rotary_embedding(head_dim, rope_theta)
+
     layers = [
         init_decoder_layer(
-            keys[i + 1], hidden_size, num_heads, num_key_value_heads, rms_norm_eps
+            keys[i + 5], hidden_size, num_heads, num_key_value_heads, rms_norm_eps
         )
         for i in range(num_layers)
     ]
-    lm_head = init_linear(keys[-1], hidden_size, vocab_size, bias=False)
+
+    lm_head = init_linear(keys[-1], hidden_size, 48, bias=True)  # 16 * 3 for 3 objects
+
     return QwenModel(
-        embed_tokens=embed,
+        embed_obj1=embed_obj1,
+        embed_obj2=embed_obj2,
+        embed_obj3=embed_obj3,
+        embed_action=embed_action,
+        embed_proj=embed_proj,
         layers=layers,
         norm=final_norm,
         rotary_emb=rot_emb,
