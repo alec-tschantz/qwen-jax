@@ -15,12 +15,16 @@ from .model import (
 )
 
 
+import jax.random as jr
+
+
 def init(
     key,
     object1_size=16,
     object2_size=16,
     object3_size=16,
     action_size=3,
+    reward_size=3,
     embed_dim_per_field=32,
     hidden_size=256,
     num_layers=2,
@@ -51,7 +55,8 @@ def init(
         for i in range(num_layers)
     ]
 
-    lm_head = init_linear(keys[-1], hidden_size, 48, bias=True)  # 16 * 3 for 3 objects
+    output_size = object1_size + object2_size + object3_size + reward_size
+    lm_head = init_linear(keys[-1], hidden_size, output_size, bias=True)
 
     return QwenModel(
         embed_obj1=embed_obj1,

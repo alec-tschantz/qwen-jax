@@ -198,8 +198,14 @@ def generate(
     obj2_tokens: Array,
     obj3_tokens: Array,
     action_tokens: Array,
-    max_tokens: int,
-) -> tuple[Array, Array, Array]:
+    obj1_size: int,
+    obj2_size: int,
+    obj3_size: int,
+    reward_size: int,
+    max_tokens: int
+) -> tuple[Array, Array, Array, Array]:
+    reward_predictions = []
+
     for i in range(max_tokens):
         T = obj1_tokens.shape[1]
         current_action_tokens = action_tokens[:, :T]
@@ -207,15 +213,25 @@ def generate(
         logits = forward(
             model, obj1_tokens, obj2_tokens, obj3_tokens, current_action_tokens
         )
+
         last_logits = logits[:, -1, :]
-        logits_obj1, logits_obj2, logits_obj3 = jnp.split(last_logits, 3, axis=-1)
+
+        logits_obj1, logits_obj2, logits_obj3, logits_rewards = jnp.split(
+            last_logits,
+            [obj1_size, obj1_size + obj2_size, obj1_size + obj2_size + obj3_size],
+            axis=-1,
+        )
 
         next_obj1 = jnp.argmax(logits_obj1, axis=-1)
         next_obj2 = jnp.argmax(logits_obj2, axis=-1)
         next_obj3 = jnp.argmax(logits_obj3, axis=-1)
 
+        predicted_rewards = jnp.argmax(logits_rewards, axis=-1)
+        reward_predictions.append(predicted_rewards)
+
         obj1_tokens = jnp.concatenate([obj1_tokens, next_obj1[:, None]], axis=1)
         obj2_tokens = jnp.concatenate([obj2_tokens, next_obj2[:, None]], axis=1)
         obj3_tokens = jnp.concatenate([obj3_tokens, next_obj3[:, None]], axis=1)
 
-    return obj1_tokens, obj2_tokens, obj3_tokens
+    reward_predictions = jnp.stack(reward_predictions, axis=1)
+    return obj1_tokens, obj2_tokens, obj3_tokens, reward_predictions
