@@ -48,19 +48,11 @@ class DecoderLayer(eqx.Module):
 
 
 class QwenModel(eqx.Module):
-    embed_obj1: Embedding
-    embed_obj2: Embedding
-    embed_obj3: Embedding
-    embed_action: Embedding
-    embed_proj: Linear
+    input_proj: Linear
     layers: List[DecoderLayer]
     norm: RMSNorm
     rotary_emb: RotaryEmbedding
-    lm_head: Linear
-
-
-def forward_embedding(e: Embedding, x: Array) -> Array:
-    return jnp.take(e.weight, x, axis=0)
+    output_proj: Linear
 
 
 def forward_linear(l: Linear, x: Array) -> Array:
@@ -166,72 +158,17 @@ def forward_decoder(
 
 def forward(
     model: QwenModel,
-    obj1_ids: Array,
-    obj2_ids: Array,
-    obj3_ids: Array,
-    action_ids: Array,
+    x: Array,
     attention_mask: Optional[Array] = None,
     position_ids: Optional[Array] = None,
 ) -> Array:
-    b, s = obj1_ids.shape
+    b, s, _ = x.shape
     if position_ids is None:
         position_ids = jnp.tile(jnp.arange(s)[None, :], (b, 1))
-
-    emb1 = forward_embedding(model.embed_obj1, obj1_ids)
-    emb2 = forward_embedding(model.embed_obj2, obj2_ids)
-    emb3 = forward_embedding(model.embed_obj3, obj3_ids)
-    embA = forward_embedding(model.embed_action, action_ids)
-
-    combined = jnp.concatenate([emb1, emb2, emb3, embA], axis=-1)
-    hidden = forward_linear(model.embed_proj, combined)
-
+        
+    hidden = forward_linear(model.input_proj, x)
     cos, sin = forward_rotary_embedding(model.rotary_emb, hidden, position_ids)
     for layer in model.layers:
         hidden = forward_decoder(layer, hidden, cos, sin, attention_mask)
     hidden = forward_rms_norm(model.norm, hidden)
-    return forward_linear(model.lm_head, hidden)
-
-
-def generate(
-    model: QwenModel,
-    obj1_tokens: Array,
-    obj2_tokens: Array,
-    obj3_tokens: Array,
-    action_tokens: Array,
-    obj1_size: int,
-    obj2_size: int,
-    obj3_size: int,
-    reward_size: int,
-    max_tokens: int
-) -> tuple[Array, Array, Array, Array]:
-    reward_predictions = []
-
-    for i in range(max_tokens):
-        T = obj1_tokens.shape[1]
-        current_action_tokens = action_tokens[:, :T]
-
-        logits = forward(
-            model, obj1_tokens, obj2_tokens, obj3_tokens, current_action_tokens
-        )
-
-        last_logits = logits[:, -1, :]
-
-        logits_obj1, logits_obj2, logits_obj3, logits_rewards = jnp.split(
-            last_logits,
-            [obj1_size, obj1_size + obj2_size, obj1_size + obj2_size + obj3_size],
-            axis=-1,
-        )
-
-        next_obj1 = jnp.argmax(logits_obj1, axis=-1)
-        next_obj2 = jnp.argmax(logits_obj2, axis=-1)
-        next_obj3 = jnp.argmax(logits_obj3, axis=-1)
-
-        predicted_rewards = jnp.argmax(logits_rewards, axis=-1)
-        reward_predictions.append(predicted_rewards)
-
-        obj1_tokens = jnp.concatenate([obj1_tokens, next_obj1[:, None]], axis=1)
-        obj2_tokens = jnp.concatenate([obj2_tokens, next_obj2[:, None]], axis=1)
-        obj3_tokens = jnp.concatenate([obj3_tokens, next_obj3[:, None]], axis=1)
-
-    reward_predictions = jnp.stack(reward_predictions, axis=1)
-    return obj1_tokens, obj2_tokens, obj3_tokens, reward_predictions
+    return forward_linear(model.output_proj, hidden)

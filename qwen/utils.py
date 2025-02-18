@@ -1,10 +1,7 @@
-import torch
-
 import equinox as eqx
 from jax import Array, numpy as jnp, random as jr
 
 from .model import (
-    Embedding,
     Linear,
     RotaryEmbedding,
     RMSNorm,
@@ -15,17 +12,10 @@ from .model import (
 )
 
 
-import jax.random as jr
-
-
 def init(
     key,
-    object1_size=16,
-    object2_size=16,
-    object3_size=16,
-    action_size=3,
-    reward_size=3,
-    embed_dim_per_field=32,
+    input_dim=15,
+    output_dim=15,
     hidden_size=256,
     num_layers=2,
     num_heads=4,
@@ -33,42 +23,23 @@ def init(
     rope_theta=10000.0,
     rms_norm_eps=1e-5,
 ) -> QwenModel:
-    keys = jr.split(key, 5 + num_layers)
-
-    embed_obj1 = init_embedding(keys[0], object1_size, embed_dim_per_field)
-    embed_obj2 = init_embedding(keys[1], object2_size, embed_dim_per_field)
-    embed_obj3 = init_embedding(keys[2], object3_size, embed_dim_per_field)
-    embed_action = init_embedding(keys[3], action_size, embed_dim_per_field)
-
-    embed_proj = init_linear(
-        keys[4], in_dim=embed_dim_per_field * 4, out_dim=hidden_size
-    )
-
+    keys = jr.split(key, 3 + num_layers)
+    inp_proj = init_linear(keys[0], input_dim, hidden_size)
     final_norm = init_rms_norm(hidden_size, rms_norm_eps)
     head_dim = hidden_size // num_heads
     rot_emb = init_rotary_embedding(head_dim, rope_theta)
-
     layers = [
         init_decoder_layer(
-            keys[i + 5], hidden_size, num_heads, num_key_value_heads, rms_norm_eps
+            keys[i + 1],
+            hidden_size,
+            num_heads,
+            num_key_value_heads,
+            rms_norm_eps,
         )
         for i in range(num_layers)
     ]
-
-    output_size = object1_size + object2_size + object3_size + reward_size
-    lm_head = init_linear(keys[-1], hidden_size, output_size, bias=True)
-
-    return QwenModel(
-        embed_obj1=embed_obj1,
-        embed_obj2=embed_obj2,
-        embed_obj3=embed_obj3,
-        embed_action=embed_action,
-        embed_proj=embed_proj,
-        layers=layers,
-        norm=final_norm,
-        rotary_emb=rot_emb,
-        lm_head=lm_head,
-    )
+    out_proj = init_linear(keys[-1], hidden_size, output_dim, bias=True)
+    return QwenModel(inp_proj, layers, final_norm, rot_emb, out_proj)
 
 
 def init_linear(
@@ -78,11 +49,6 @@ def init_linear(
     weight = jr.normal(k1, (out_dim, in_dim)) * jnp.sqrt(2.0 / (in_dim + out_dim))
     b = jr.normal(k2, (out_dim,)) * 0.01 if bias else None
     return Linear(weight=weight, bias=b)
-
-
-def init_embedding(key: jr.PRNGKey, vocab_size: int, hidden_dim: int) -> Embedding:
-    weight = jr.normal(key, (vocab_size, hidden_dim)) * 0.02
-    return Embedding(weight=weight)
 
 
 def init_rms_norm(hidden_dim: int, eps: float) -> RMSNorm:
@@ -136,89 +102,4 @@ def init_decoder_layer(
     post_ln = init_rms_norm(hidden_size, rms_norm_eps)
     return DecoderLayer(
         self_attn=attn, mlp=mlp, input_layernorm=in_ln, post_attention_layernorm=post_ln
-    )
-
-
-def torch_to_jax(tensor: torch.Tensor) -> Array:
-    return jnp.array(tensor.detach().numpy())
-
-
-def from_hf(hf_model: torch.nn.Module) -> QwenModel:
-    cfg = hf_model.config
-
-    embed = Embedding(weight=torch_to_jax(hf_model.model.embed_tokens.weight))
-
-    final_norm = RMSNorm(
-        weight=torch_to_jax(hf_model.model.norm.weight),
-        eps=hf_model.config.rms_norm_eps,
-    )
-
-    emb_dim = hf_model.config.hidden_size // hf_model.config.num_attention_heads
-    rot_emb = RotaryEmbedding(theta=hf_model.config.rope_theta, dim=emb_dim)
-
-    layers_out = []
-    for i, hf_layer in enumerate(hf_model.model.layers):
-
-        q_proj = Linear(
-            weight=torch_to_jax(hf_layer.self_attn.q_proj.weight),
-            bias=torch_to_jax(hf_layer.self_attn.q_proj.bias),
-        )
-        k_proj = Linear(
-            weight=torch_to_jax(hf_layer.self_attn.k_proj.weight),
-            bias=torch_to_jax(hf_layer.self_attn.k_proj.bias),
-        )
-        v_proj = Linear(
-            weight=torch_to_jax(hf_layer.self_attn.v_proj.weight),
-            bias=torch_to_jax(hf_layer.self_attn.v_proj.bias),
-        )
-        o_proj = Linear(
-            weight=torch_to_jax(hf_layer.self_attn.o_proj.weight),
-            bias=None,
-        )
-        attn_struct = Attention(
-            q_proj=q_proj,
-            k_proj=k_proj,
-            v_proj=v_proj,
-            o_proj=o_proj,
-            num_heads=hf_model.config.num_attention_heads,
-            num_key_value_heads=hf_model.config.num_key_value_heads,
-            head_dim=(
-                hf_model.config.hidden_size // hf_model.config.num_attention_heads
-            ),
-        )
-
-        mlp_struct = Dense(
-            gate_proj=Linear(
-                weight=torch_to_jax(hf_layer.mlp.gate_proj.weight), bias=None
-            ),
-            up_proj=Linear(weight=torch_to_jax(hf_layer.mlp.up_proj.weight), bias=None),
-            down_proj=Linear(
-                weight=torch_to_jax(hf_layer.mlp.down_proj.weight), bias=None
-            ),
-        )
-
-        in_ln = RMSNorm(
-            weight=torch_to_jax(hf_layer.input_layernorm.weight),
-            eps=hf_model.config.rms_norm_eps,
-        )
-        post_ln = RMSNorm(
-            weight=torch_to_jax(hf_layer.post_attention_layernorm.weight),
-            eps=hf_model.config.rms_norm_eps,
-        )
-        layers_out.append(
-            DecoderLayer(
-                self_attn=attn_struct,
-                mlp=mlp_struct,
-                input_layernorm=in_ln,
-                post_attention_layernorm=post_ln,
-            )
-        )
-
-    lm_head = Linear(weight=torch_to_jax(hf_model.lm_head.weight), bias=None)
-    return QwenModel(
-        embed_tokens=embed,
-        layers=layers_out,
-        norm=final_norm,
-        rotary_emb=rot_emb,
-        lm_head=lm_head,
     )
